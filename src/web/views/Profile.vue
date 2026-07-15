@@ -70,7 +70,7 @@
         <div><b>{{ youBoosted }}</b><span>boosts given</span></div>
         <div><b>{{ youBurned }}</b><span>XOR burned</span></div>
       </div>
-      <p class="anote">Your contribution totals come alive once donations and boosts are live.</p>
+      <p class="anote">Preview totals from testnet activity — no real XOR moves yet.</p>
 
       <h2 class="asec">Saved / tracking</h2>
       <p v-if="saved.length === 0" class="empty">Nothing saved yet. Tap the bookmark on any story to track it here.</p>
@@ -104,12 +104,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { useCommonsStore } from "@/stores/commons";
 import ProfileEditor from "@/web/components/ProfileEditor.vue";
 import CountUp from "../components/CountUp.vue";
-
-onMounted(() => { window.scrollTo(0, 0); if (isOwn.value) commons.checkDraft(); });
 
 const emit = defineEmits<{ (e: "nav", id: string): void }>();
 const commons = useCommonsStore();
@@ -131,9 +129,17 @@ const totalBackers = computed(() => theirProposals.value.reduce((s: number, p: a
 const saved = computed(() => commons.proposals.filter((p: any) => commons.isSaved(p.id)));
 
 // own contribution totals — honest zeros until mechanics + backend
-const youDonated = ref(0);
+const youDonated = ref("0");
 const youBoosted = ref(0);
-const youBurned = ref(0);
+const youBurned = ref("0");
+async function loadContrib() {
+  const t = await commons.getContributionTotals(accountId.value);
+  youDonated.value = t.donated;
+  youBoosted.value = t.boosts;
+  youBurned.value = t.burned;
+}
+onMounted(() => { window.scrollTo(0, 0); if (isOwn.value) commons.checkDraft(); loadContrib(); });
+watch(accountId, () => loadContrib());
 const confirmDeleteDraft = ref(false);
 async function onDeleteDraft() { await commons.deleteDraft(); confirmDeleteDraft.value = false; }
 

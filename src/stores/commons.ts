@@ -756,6 +756,14 @@ const draftFiles = ref<any[]>([]);
   function getAvatar(accountId: string): string {
     return avatarByAccount.value[accountId] || "";
   }
+  async function getContributionTotals(acct: string) {
+    if (!acct) return { donated: "0.0000", burned: "0.0000", boosts: 0 };
+    const { data: don } = await supabase.from("donations").select("amount, burned").eq("donor_account_id", acct);
+    const { data: boo } = await supabase.from("boosts").select("proposal_id").eq("account_id", acct);
+    const donated = (don ?? []).reduce((s, r) => s + parseFloat(r.amount || "0"), 0);
+    const burned = (don ?? []).reduce((s, r) => s + parseFloat(r.burned || "0"), 0);
+    return { donated: donated.toFixed(4), burned: burned.toFixed(4), boosts: (boo ?? []).length };
+  }
   async function searchAll(query: string) {
     const q = query.trim();
     if (!q) return { stories: [], people: [] };
@@ -1553,7 +1561,7 @@ const toggleFollow = (id: string): void => {
     donate, donatedProposals, DEMO_ACCOUNTS, demoAccountId, setDemoAccount, boostsRemaining, boostBlockedTick, mockWalletId, initMockWallet,
     notifications, unreadCount, loadNotifications, markNotificationsRead,
     uniqueBackerCount, feedShownIds, feedScrollY, exploreScrollY, feedInitialized, initFeedSnapshot, revealFeedPending, subscribeToProposals, unsubscribeProposals, subscribeToNotifications, unsubscribeNotifications, subscribeToSocial, unsubscribeSocial, createNotification, boostRows,
-    subscribeToDonations, unsubscribeDonations, searchAll,
+    subscribeToDonations, unsubscribeDonations, searchAll, getContributionTotals,
 
     // Reputation
     reputation, effectiveReputation, reputationRecord, creditReputation, myReputation,
