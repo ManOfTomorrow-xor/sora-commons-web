@@ -4,7 +4,7 @@
 
 SORA Commons is a web application where builders share what they're making, prove it step by step, and earn direct support — with every contribution tied to real, verifiable progress.
 
-It is built on **[SORA Nexus](https://sora.org)** and the **[Iroha 3](https://github.com/hyperledger-iroha)** ledger, developed by [Soramitsu](https://soramitsu.co.jp). SORA Commons is an independent application built on this ecosystem; it targets Iroha 3 as its settlement layer.
+It is built on **[SORA Nexus](https://sora.org)** and the **[Iroha 3](https://github.com/hyperledger-iroha)** ledger. SORA Commons is an independent application built on this ecosystem; it targets Iroha 3 as its settlement layer.
 
 Motto: **Productive work burns true.**
 
