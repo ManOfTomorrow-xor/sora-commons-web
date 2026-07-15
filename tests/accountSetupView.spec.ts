@@ -1,0 +1,1204 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
+import AccountSetupView from "@/views/AccountSetupView.vue";
+import { translate } from "@/i18n/messages";
+import { useSessionStore } from "@/stores/session";
+import type { ConnectionConfig } from "@/stores/session";
+import { TAIRA_CHAIN_PRESET } from "@/constants/chains";
+import { mnemonicToPrivateKeyHex } from "@/utils/mnemonic";
+import { buildWalletBackupPayload } from "@/utils/walletBackup";
+import {
+  buildIrohaConnectTokenProtocol,
+  decodeIrohaConnectFrame,
+} from "@/utils/irohaConnect";
+
+const EXAMPLE_REAL_I105_ACCOUNT_ID =
+  "testuロ1PノウヌmEエWオebHム6ヤルイヰiwuCWErJ7uスoPGアヤnjムKヒTCW2PV";
+const VALID_MNEMONIC =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const VALID_MNEMONIC_PRIVATE_KEY_HEX =
+  "5EB00BBDDCF069084889A8AB9155568165F5C453CCB85E70811AAED6F6DA5FC1";
+const VALID_24_WORD_MNEMONIC =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+const VALID_CONNECT_SID = Buffer.from(new Uint8Array(32).fill(0xce)).toString(
+  "base64url",
+);
+const copyTextToClipboardMock = vi.fn();
+const createConnectPreviewMock = vi.fn();
+const deriveAccountAddressMock = vi.fn();
+const derivePublicKeyMock = vi.fn();
+const exportConfidentialWalletBackupMock = vi.fn();
+const importConfidentialWalletBackupMock = vi.fn();
+const isSecureVaultAvailableMock = vi.fn();
+const storeAccountSecretMock = vi.fn();
+const onboardAccountMock = vi.fn();
+const routerPushMock = vi.fn();
+const qrToDataUrlMock = vi.fn();
+type QrDecodeHandler = (payload: string) => void;
+let connectQrDecodeHandler: QrDecodeHandler | null = null;
+const t = (key: string, params?: Record<string, string | number>) =>
+  translate("en-US", key, params);
+
+type FakeWebSocketListener = {
+  callback: (event: Event | MessageEvent) => void;
+  once: boolean;
+};
+
+class FakeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static instances: FakeWebSocket[] = [];
+
+  readonly sent: unknown[] = [];
+  readonly listeners = new Map<string, FakeWebSocketListener[]>();
+  binaryType: BinaryType = "blob";
+  readyState = FakeWebSocket.CONNECTING;
+  closeCode: number | null = null;
+  closeReason = "";
+
+  constructor(
+    readonly url: string | URL,
+    readonly protocols?: string | string[],
+  ) {
+    FakeWebSocket.instances.push(this);
+  }
+
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: AddEventListenerOptions | boolean,
+  ) {
+    const callback =
+      typeof listener === "function"
+        ? listener
+        : (event: Event | MessageEvent) => listener.handleEvent(event);
+    const once = typeof options === "object" && Boolean(options.once);
+    const current = this.listeners.get(type) ?? [];
+    current.push({ callback, once });
+    this.listeners.set(type, current);
+  }
+
+  send(data: unknown) {
+    this.sent.push(data);
+  }
+
+  close(code?: number, reason?: string) {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.closeCode = code ?? null;
+    this.closeReason = reason ?? "";
+  }
+
+  emit(type: string, event: Event | MessageEvent = new Event(type)) {
+    if (type === "open") {
+      this.readyState = FakeWebSocket.OPEN;
+    }
+    const current = this.listeners.get(type) ?? [];
+    for (const entry of current) {
+      entry.callback(event);
+    }
+    this.listeners.set(
+      type,
+      current.filter((entry) => !entry.once),
+    );
+  }
+}
+
+vi.mock("vue-router", () => ({
+  useRouter: () => ({
+    push: routerPushMock,
+  }),
+}));
+
+vi.mock("qrcode", () => ({
+  default: {
+    toDataURL: (payload: string) => qrToDataUrlMock(payload),
+  },
+}));
+
+vi.mock("@/services/iroha", () => ({
+  copyTextToClipboard: (text: string) => copyTextToClipboardMock(text),
+  createConnectPreview: (input: unknown) => createConnectPreviewMock(input),
+  deriveAccountAddress: (input: unknown) => deriveAccountAddressMock(input),
+  derivePublicKey: (privateKeyHex: string) =>
+    derivePublicKeyMock(privateKeyHex),
+  exportConfidentialWalletBackup: (input: unknown) =>
+    exportConfidentialWalletBackupMock(input),
+  importConfidentialWalletBackup: (input: unknown) =>
+    importConfidentialWalletBackupMock(input),
+  isSecureVaultAvailable: () => isSecureVaultAvailableMock(),
+  storeAccountSecret: (input: unknown) => storeAccountSecretMock(input),
+  onboardAccount: (input: unknown) => onboardAccountMock(input),
+}));
+
+vi.mock("@/composables/useQrScanner", async () => {
+  const { ref } = await vi.importActual<typeof import("vue")>("vue");
+  return {
+    useQrScanner: (onDecode: QrDecodeHandler) => {
+      connectQrDecodeHandler = onDecode;
+      return {
+        scanning: ref(false),
+        screenScanning: ref(false),
+        message: ref(""),
+        videoRef: ref<HTMLVideoElement | null>(null),
+        fileInputRef: ref<HTMLInputElement | null>(null),
+        start: vi.fn(),
+        stop: vi.fn(),
+        openFilePicker: vi.fn(),
+        decodeScreen: vi.fn(),
+        decodeFile: vi.fn(),
+      };
+    },
+  };
+});
+
+describe("AccountSetupView", () => {
+  beforeEach(() => {
+    connectQrDecodeHandler = null;
+    FakeWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    createConnectPreviewMock.mockReset();
+    copyTextToClipboardMock.mockReset();
+    copyTextToClipboardMock.mockResolvedValue(undefined);
+    deriveAccountAddressMock.mockReset();
+    derivePublicKeyMock.mockReset();
+    exportConfidentialWalletBackupMock.mockReset();
+    importConfidentialWalletBackupMock.mockReset();
+    isSecureVaultAvailableMock.mockReset();
+    storeAccountSecretMock.mockReset();
+    onboardAccountMock.mockReset();
+    routerPushMock.mockReset();
+    qrToDataUrlMock.mockReset();
+    deriveAccountAddressMock.mockImplementation(
+      (input: { domain?: string }) => ({
+        accountId: `alice@${input.domain || "wonderland"}`,
+        i105AccountId: EXAMPLE_REAL_I105_ACCOUNT_ID,
+        i105DefaultAccountId: EXAMPLE_REAL_I105_ACCOUNT_ID,
+        i105DefaultFullwidthAccountId: "",
+        publicKeyHex: "ab".repeat(32),
+        accountIdWarning: "",
+      }),
+    );
+    derivePublicKeyMock.mockResolvedValue({
+      publicKeyHex: "ab".repeat(32),
+    });
+    exportConfidentialWalletBackupMock.mockResolvedValue({
+      schema: "iroha-demo-confidential-wallet-backup/v2",
+      chainId: TAIRA_CHAIN_PRESET.connection.chainId,
+      accountId: "alice@default",
+      scanWatermarkBlock: 12,
+      stateBox: {
+        kdf: "HKDF-SHA256",
+        cipher: "AES-256-GCM",
+        saltBase64Url: "salt",
+        ivBase64Url: "iv",
+        ciphertextBase64Url: "ciphertext",
+        authTagBase64Url: "tag",
+      },
+    });
+    importConfidentialWalletBackupMock.mockResolvedValue(undefined);
+    isSecureVaultAvailableMock.mockResolvedValue(true);
+    storeAccountSecretMock.mockResolvedValue(undefined);
+    setActivePinia(createPinia());
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const mountView = (options?: {
+    connection?: Partial<ConnectionConfig>;
+    withSavedAccount?: boolean;
+    savedAccount?: {
+      displayName?: string;
+      domain?: string;
+      accountId?: string;
+      i105AccountId?: string;
+      i105DefaultAccountId?: string;
+      publicKeyHex?: string;
+      privateKeyHex?: string;
+      hasStoredSecret?: boolean;
+      localOnly?: boolean;
+    };
+  }) => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const session = useSessionStore();
+    session.$patch({
+      connection: {
+        ...TAIRA_CHAIN_PRESET.connection,
+        ...options?.connection,
+      },
+    });
+    if (options?.withSavedAccount || options?.savedAccount) {
+      const savedAccount = {
+        displayName: "Alice",
+        domain: "wonderland",
+        accountId: "alice@wonderland",
+        i105AccountId: EXAMPLE_REAL_I105_ACCOUNT_ID,
+        publicKeyHex: "ab".repeat(32),
+        privateKeyHex: "cd".repeat(32),
+        hasStoredSecret: true,
+        localOnly: false,
+        ...options?.savedAccount,
+      };
+      session.$patch({
+        accounts: [savedAccount],
+        activeAccountId: savedAccount.accountId,
+      });
+    }
+    return mount(AccountSetupView, {
+      global: {
+        plugins: [pinia],
+      },
+    });
+  };
+
+  const getButtonByText = (
+    wrapper: ReturnType<typeof mount>,
+    label: string,
+  ) => {
+    const button = wrapper
+      .findAll("button")
+      .find((node) => node.text() === label);
+    if (!button) {
+      throw new Error(`Button not found: ${label}`);
+    }
+    return button;
+  };
+
+  const getTextInputs = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('input:not([type="checkbox"]):not([type="file"])');
+
+  const setInputFiles = (input: HTMLInputElement, files: File[]) => {
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: files,
+    });
+  };
+
+  const scanConnectQr = async (payload: string) => {
+    if (!connectQrDecodeHandler) {
+      throw new Error("IrohaConnect QR decode handler was not registered.");
+    }
+    connectQrDecodeHandler(payload);
+    await flushPromises();
+  };
+
+  it("focuses first launch on the onboarding wizard", () => {
+    const wrapper = mountView();
+
+    expect(wrapper.text()).toContain(t("Create wallet"));
+    expect(wrapper.text()).toContain("I105 Account ID");
+    expect(wrapper.text()).toContain(
+      t(
+        "The domain label defaults to {domain}. It is a neutral SDK label for local derivation, not an on-chain dataspace alias.",
+        {
+          domain: t("default"),
+        },
+      ),
+    );
+    expect(wrapper.text()).not.toContain(t("IrohaConnect Pairing"));
+    expect(wrapper.text()).not.toContain(t("Saved Wallets"));
+    expect(wrapper.findAll(".account-step")).toHaveLength(3);
+  });
+
+  it("requests the irohaconnect launch URI for pairing QR generation", async () => {
+    createConnectPreviewMock.mockResolvedValueOnce({
+      walletUri: "irohaconnect://connect?sid=preview-1",
+      walletCanonicalUri: "iroha://connect?sid=preview-1",
+      sidBase64Url: "sid-1",
+      tokenWallet: "wallet-token-1",
+    });
+    qrToDataUrlMock.mockResolvedValueOnce("data:image/png;base64,preview-1");
+
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await getButtonByText(wrapper, t("Generate pairing QR")).trigger("click");
+    await flushPromises();
+
+    expect(createConnectPreviewMock).toHaveBeenCalledWith({
+      toriiUrl: TAIRA_CHAIN_PRESET.connection.toriiUrl,
+      chainId: TAIRA_CHAIN_PRESET.connection.chainId,
+      launchProtocol: "irohaconnect",
+    });
+    expect(qrToDataUrlMock).toHaveBeenCalledWith(
+      "irohaconnect://connect?sid=preview-1",
+    );
+    expect(wrapper.text()).toContain("sid-1");
+  });
+
+  it("opens the wallet when the active saved wallet is selected", async () => {
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await getButtonByText(wrapper, t("Open wallet")).trigger("click");
+    await flushPromises();
+
+    expect(routerPushMock).toHaveBeenCalledWith("/wallet");
+  });
+
+  it("switches to another saved wallet and opens the wallet", async () => {
+    const wrapper = mountView({ withSavedAccount: true });
+    const session = useSessionStore();
+    session.$patch({
+      accounts: [
+        ...session.accounts,
+        {
+          displayName: "Bob",
+          domain: "wonderland",
+          accountId: "bob@wonderland",
+          publicKeyHex: "bc".repeat(32),
+          privateKeyHex: "",
+          hasStoredSecret: true,
+          localOnly: false,
+        },
+      ],
+    });
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Switch to this account")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    expect(session.activeAccountId).toBe("bob@wonderland");
+    expect(routerPushMock).toHaveBeenCalledWith("/wallet");
+  });
+
+  it("ignores stale pairing preview success after reset", async () => {
+    createConnectPreviewMock.mockResolvedValueOnce({
+      walletUri: "wc:preview-1",
+      sidBase64Url: "sid-1",
+      tokenWallet: "wallet-token-1",
+    });
+    qrToDataUrlMock.mockResolvedValueOnce("data:image/png;base64,preview-1");
+
+    let resolveSecondPreview: (value: unknown) => void = () => {};
+    const secondPreviewDeferred = new Promise((resolve) => {
+      resolveSecondPreview = resolve;
+    });
+    createConnectPreviewMock.mockReturnValueOnce(secondPreviewDeferred);
+    qrToDataUrlMock.mockResolvedValueOnce("data:image/png;base64,preview-2");
+
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await getButtonByText(wrapper, t("Generate pairing QR")).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("sid-1");
+
+    await getButtonByText(wrapper, t("Generate pairing QR")).trigger("click");
+    await flushPromises();
+    await getButtonByText(wrapper, "Reset").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("sid-1");
+    expect(
+      getButtonByText(wrapper, t("Generate pairing QR")).attributes("disabled"),
+    ).toBeUndefined();
+
+    resolveSecondPreview({
+      walletUri: "wc:preview-2",
+      sidBase64Url: "sid-2",
+      tokenWallet: "wallet-token-2",
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("sid-2");
+    expect(wrapper.text()).not.toContain("wallet-token-2");
+  });
+
+  it("ignores stale pairing preview error after reset", async () => {
+    createConnectPreviewMock.mockResolvedValueOnce({
+      walletUri: "wc:preview-1",
+      sidBase64Url: "sid-1",
+      tokenWallet: "wallet-token-1",
+    });
+    qrToDataUrlMock.mockResolvedValueOnce("data:image/png;base64,preview-1");
+
+    let rejectSecondPreview: (reason?: unknown) => void = () => {};
+    const secondPreviewDeferred = new Promise((_, reject) => {
+      rejectSecondPreview = reject;
+    });
+    createConnectPreviewMock.mockReturnValueOnce(secondPreviewDeferred);
+
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await getButtonByText(wrapper, t("Generate pairing QR")).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("sid-1");
+
+    await getButtonByText(wrapper, t("Generate pairing QR")).trigger("click");
+    await flushPromises();
+    await getButtonByText(wrapper, "Reset").trigger("click");
+    await flushPromises();
+
+    rejectSecondPreview(new Error("preview down"));
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("preview down");
+    expect(wrapper.text()).not.toContain("sid-1");
+    expect(
+      getButtonByText(wrapper, t("Generate pairing QR")).attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("approves a scanned wallet-role IrohaConnect QR over the relay WebSocket", async () => {
+    const wrapper = mountView({ withSavedAccount: true });
+    const relayNode = "https://relay.example";
+    const walletToken = "wallet-token-1";
+    const payload = `iroha://connect?sid=${VALID_CONNECT_SID}&chain_id=chain-a&node=${encodeURIComponent(
+      relayNode,
+    )}&v=1&role=wallet&token=${encodeURIComponent(walletToken)}`;
+
+    await scanConnectQr(payload);
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(wrapper.find(".connect-modal-backdrop").exists()).toBe(true);
+    expect(wrapper.text()).toContain(t("Approve connection?"));
+    expect(wrapper.text()).toContain(EXAMPLE_REAL_I105_ACCOUNT_ID);
+    await getButtonByText(wrapper, t("Approve connection")).trigger("click");
+    await flushPromises();
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const socket = FakeWebSocket.instances[0];
+    expect(String(socket.url)).toBe(
+      `wss://relay.example/v1/connect/ws?sid=${VALID_CONNECT_SID}&role=wallet`,
+    );
+    expect(socket.protocols).toEqual([
+      buildIrohaConnectTokenProtocol(walletToken),
+    ]);
+    expect(socket.binaryType).toBe("arraybuffer");
+    expect(wrapper.text()).toContain(VALID_CONNECT_SID);
+    expect(wrapper.text()).toContain("chain-a");
+    expect(wrapper.text()).toContain(relayNode);
+
+    socket.emit("open");
+    await flushPromises();
+
+    expect(socket.sent).toHaveLength(1);
+    expect(socket.sent[0]).toBeInstanceOf(Uint8Array);
+    expect((socket.sent[0] as Uint8Array).length).toBeGreaterThan(400);
+    const approvalFrame = decodeIrohaConnectFrame(socket.sent[0] as Uint8Array);
+    expect(approvalFrame.kind).toBe("other");
+    expect(approvalFrame.direction).toBe("wallet-to-app");
+    expect(approvalFrame.sequence).toBe(1);
+    expect(Array.from(approvalFrame.sid)).toEqual(
+      Array.from(new Uint8Array(32).fill(0xce)),
+    );
+    if (approvalFrame.kind !== "other") {
+      throw new Error("Expected IrohaConnect approval control frame.");
+    }
+    expect(approvalFrame.frameKind).toBe(0);
+    expect(wrapper.text()).toContain(EXAMPLE_REAL_I105_ACCOUNT_ID);
+    expect(wrapper.text()).toContain(t("IrohaConnect approved."));
+  });
+
+  it("rejects scanned wallet-role IrohaConnect QR approval when the token is missing", async () => {
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await scanConnectQr(
+      `iroha://connect?sid=${VALID_CONNECT_SID}&role=wallet&node=${encodeURIComponent(
+        "https://relay.example",
+      )}`,
+    );
+
+    expect(wrapper.find(".connect-modal-backdrop").exists()).toBe(true);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    await getButtonByText(wrapper, t("Approve connection")).trigger("click");
+    await flushPromises();
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(wrapper.text()).toContain("IrohaConnect wallet token is missing.");
+  });
+
+  it("rejects a scanned wallet-role IrohaConnect QR without opening the relay", async () => {
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await scanConnectQr(
+      `iroha://connect?sid=${VALID_CONNECT_SID}&role=wallet&token=wallet-token-1`,
+    );
+
+    expect(wrapper.find(".connect-modal-backdrop").exists()).toBe(true);
+    await getButtonByText(wrapper, t("Reject")).trigger("click");
+    await flushPromises();
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(wrapper.find(".connect-modal-backdrop").exists()).toBe(false);
+    expect(wrapper.text()).toContain(t("IrohaConnect connection rejected."));
+  });
+
+  it("rejects scanned IrohaConnect QRs that are not for the wallet role", async () => {
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await scanConnectQr(
+      `iroha://connect?sid=${VALID_CONNECT_SID}&role=app&token=wallet-token-1`,
+    );
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(wrapper.text()).toContain(
+      "Scan the wallet-role IrohaConnect QR from the app.",
+    );
+    expect(wrapper.text()).not.toContain(VALID_CONNECT_SID);
+  });
+
+  it("surfaces relay open timeouts before sending an IrohaConnect approval frame", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountView({ withSavedAccount: true });
+
+    await scanConnectQr(
+      `iroha://connect?sid=${VALID_CONNECT_SID}&role=wallet&token=wallet-token-1`,
+    );
+
+    await getButtonByText(wrapper, t("Approve connection")).trigger("click");
+    await flushPromises();
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const socket = FakeWebSocket.instances[0];
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+
+    expect(socket.sent).toHaveLength(0);
+    expect(wrapper.text()).toContain("IrohaConnect approval timed out.");
+  });
+
+  it("saves the first generated account locally and routes to the wallet", async () => {
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    expect(inputs).toHaveLength(2);
+
+    await inputs[0].setValue("Alice");
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain(t("Register on-chain alias"));
+    expect(
+      wrapper
+        .findAll("button")
+        .some((button) => button.text() === t("Advanced")),
+    ).toBe(false);
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(onboardAccountMock).not.toHaveBeenCalled();
+    expect(routerPushMock).toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBe("alice@flowers");
+    expect(session.activeAccount?.displayName).toBe("Alice");
+    expect(session.activeAccount?.hasStoredSecret).toBe(true);
+    expect(session.activeAccount?.localOnly).toBe(true);
+  });
+
+  it("shows secure storage errors when saving the generated account fails", async () => {
+    isSecureVaultAvailableMock.mockResolvedValue(false);
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[0].setValue("Alice");
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(
+      t("Secure OS-backed key storage is unavailable on this device."),
+    );
+    expect(storeAccountSecretMock).not.toHaveBeenCalled();
+    expect(routerPushMock).not.toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBeNull();
+  });
+
+  it("shows a secure storage error when the availability bridge rejects", async () => {
+    isSecureVaultAvailableMock.mockRejectedValueOnce(
+      new Error("IPC unavailable"),
+    );
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[0].setValue("Alice");
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(
+      t("Secure OS-backed key storage is unavailable on this device."),
+    );
+    expect(storeAccountSecretMock).not.toHaveBeenCalled();
+    expect(routerPushMock).not.toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBeNull();
+  });
+
+  it("keeps the wallet unsaved when the vault write rejects late", async () => {
+    storeAccountSecretMock.mockRejectedValueOnce(
+      new Error("Windows DPAPI command failed: access denied"),
+    );
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[0].setValue("Alice");
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(storeAccountSecretMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "alice@flowers",
+        privateKeyHex: expect.stringMatching(/^[0-9a-f]{64}$/i),
+      }),
+    );
+    expect(wrapper.text()).toContain(
+      "Windows DPAPI command failed: access denied",
+    );
+    expect(importConfidentialWalletBackupMock).not.toHaveBeenCalled();
+    expect(routerPushMock).not.toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBeNull();
+  });
+
+  it("copies the generated recovery phrase instead of downloading the manual backup", async () => {
+    const wrapper = mountView();
+
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(t("Copy phrase"));
+    expect(wrapper.text()).not.toContain(t("Download backup"));
+
+    await getButtonByText(wrapper, t("Copy phrase")).trigger("click");
+    await flushPromises();
+
+    expect(copyTextToClipboardMock).toHaveBeenCalledTimes(1);
+    const copiedPhrase = String(
+      copyTextToClipboardMock.mock.calls[0]?.[0] ?? "",
+    );
+    expect(copiedPhrase.split(" ")).toHaveLength(24);
+    expect(copiedPhrase).not.toContain("\n");
+    expect(copiedPhrase).not.toContain("1.");
+    expect(wrapper.text()).toContain(t("Recovery phrase copied to clipboard."));
+
+    await getButtonByText(wrapper, "Reset").trigger("click");
+    await flushPromises();
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    await wrapper.find("textarea").setValue(copiedPhrase);
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+
+    expect(derivePublicKeyMock).toHaveBeenLastCalledWith(
+      mnemonicToPrivateKeyHex(copiedPhrase),
+    );
+  });
+
+  it("saves the first account locally without UAID onboarding", async () => {
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    expect(inputs).toHaveLength(2);
+
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(onboardAccountMock).not.toHaveBeenCalled();
+    expect(routerPushMock).toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBe("alice@flowers");
+    expect(session.activeAccount?.displayName).toBe("");
+    expect(session.activeAccount?.hasStoredSecret).toBe(true);
+    expect(session.activeAccount?.localOnly).toBe(true);
+  });
+
+  it("preserves the previewed network prefix for vault storage and the saved account", async () => {
+    deriveAccountAddressMock.mockImplementation(
+      (input: { domain?: string; networkPrefix?: number }) => {
+        const prefix = input.networkPrefix === 369 ? "testu" : "n42u";
+        const suffix = `${input.domain || "default"}StableAccount1234567890`;
+        return {
+          accountId: `${prefix}${suffix}`,
+          i105AccountId: `${prefix}${suffix}`,
+          i105DefaultAccountId: `sorau${suffix}`,
+          i105DefaultFullwidthAccountId: "",
+          publicKeyHex: "ab".repeat(32),
+          accountIdWarning: "",
+        };
+      },
+    );
+    const wrapper = mountView({
+      connection: {
+        ...TAIRA_CHAIN_PRESET.connection,
+        networkPrefix: 42,
+      },
+    });
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("n42uflowersStableAccount1234567890");
+    expect(wrapper.text()).not.toContain("testuflowersStableAccount1234567890");
+
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(storeAccountSecretMock).toHaveBeenCalledWith({
+      accountId: "n42uflowersStableAccount1234567890",
+      privateKeyHex: expect.stringMatching(/^[0-9a-f]{64}$/i),
+    });
+    expect(session.connection.networkPrefix).toBe(42);
+    expect(session.activeAccountId).toBe("n42uflowersStableAccount1234567890");
+    expect(session.activeAccount?.i105AccountId).toBe(
+      "n42uflowersStableAccount1234567890",
+    );
+  });
+
+  it("does not replace a previewed custom-prefix account with the default i105 id when bridge output is partial", async () => {
+    deriveAccountAddressMock.mockImplementation(
+      (input: { domain?: string; networkPrefix?: number }) => {
+        const prefix = input.networkPrefix === 369 ? "testu" : "n42u";
+        const suffix = `${input.domain || "default"}PartialAccount1234567890`;
+        return {
+          accountId: `${prefix}${suffix}`,
+          i105AccountId: "",
+          i105DefaultAccountId: `sorau${suffix}`,
+          i105DefaultFullwidthAccountId: "",
+          publicKeyHex: "ab".repeat(32),
+          accountIdWarning: "partial i105 output",
+        };
+      },
+    );
+    const wrapper = mountView({
+      connection: {
+        ...TAIRA_CHAIN_PRESET.connection,
+        networkPrefix: 42,
+      },
+    });
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(storeAccountSecretMock).toHaveBeenCalledWith({
+      accountId: "n42uflowersPartialAccount1234567890",
+      privateKeyHex: expect.stringMatching(/^[0-9a-f]{64}$/i),
+    });
+    expect(session.activeAccountId).toBe("n42uflowersPartialAccount1234567890");
+    expect(session.activeAccount?.i105AccountId).toBe(
+      "n42uflowersPartialAccount1234567890",
+    );
+    expect(session.activeAccount?.i105DefaultAccountId).toBe(
+      "sorauflowersPartialAccount1234567890",
+    );
+  });
+
+  it("restores a wallet from a recovery phrase without re-registering it", async () => {
+    const wrapper = mountView();
+    const session = useSessionStore();
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    const textarea = wrapper.find("textarea");
+    expect(textarea.exists()).toBe(true);
+    await textarea.setValue(VALID_MNEMONIC);
+
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+
+    expect(derivePublicKeyMock).toHaveBeenCalledWith(
+      VALID_MNEMONIC_PRIVATE_KEY_HEX,
+    );
+    expect(wrapper.text()).not.toContain(t("Download backup"));
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    expect(onboardAccountMock).not.toHaveBeenCalled();
+    expect(routerPushMock).toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBe("alice@default");
+    expect(session.activeAccount?.hasStoredSecret).toBe(true);
+    expect(session.activeAccount?.localOnly).toBe(true);
+  });
+
+  it("restores local metadata from an imported backup JSON file", async () => {
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const backupPayload = JSON.stringify(
+      buildWalletBackupPayload({
+        mnemonic: VALID_MNEMONIC,
+        wordCount: 12,
+        target: "manual",
+        createdAt: "2026-03-29T00:00:00.000Z",
+        displayName: "Backup Alice",
+        domain: "backup-domain",
+        confidentialWallet: {
+          schema: "iroha-demo-confidential-wallet-backup/v2",
+          chainId: TAIRA_CHAIN_PRESET.connection.chainId,
+          accountId: "alice@backup-domain",
+          scanWatermarkBlock: 42,
+          stateBox: {
+            kdf: "HKDF-SHA256",
+            cipher: "AES-256-GCM",
+            saltBase64Url: "salt",
+            ivBase64Url: "iv",
+            ciphertextBase64Url: "ciphertext",
+            authTagBase64Url: "tag",
+          },
+        },
+      }),
+    );
+    const backupFile = new File([backupPayload], "iroha-backup.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(backupFile, "text", {
+      configurable: true,
+      value: () => Promise.resolve(backupPayload),
+    });
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    const fileInput = wrapper.find('input[type="file"]');
+    expect(fileInput.exists()).toBe(true);
+    setInputFiles(fileInput.element as HTMLInputElement, [backupFile]);
+    await fileInput.trigger("change");
+    await flushPromises();
+    await flushPromises();
+
+    expect(derivePublicKeyMock).toHaveBeenCalledWith(
+      VALID_MNEMONIC_PRIVATE_KEY_HEX,
+    );
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    expect(session.activeAccount?.displayName).toBe("Backup Alice");
+    expect(session.activeAccount?.domain).toBe("backup-domain");
+    expect(session.activeAccount?.localOnly).toBe(true);
+    expect(importConfidentialWalletBackupMock).toHaveBeenCalledWith({
+      toriiUrl: TAIRA_CHAIN_PRESET.connection.toriiUrl,
+      accountId: "alice@backup-domain",
+      mnemonic: VALID_MNEMONIC,
+      confidentialWallet: {
+        schema: "iroha-demo-confidential-wallet-backup/v2",
+        chainId: TAIRA_CHAIN_PRESET.connection.chainId,
+        accountId: "alice@backup-domain",
+        scanWatermarkBlock: 42,
+        stateBox: {
+          kdf: "HKDF-SHA256",
+          cipher: "AES-256-GCM",
+          saltBase64Url: "salt",
+          ivBase64Url: "iv",
+          ciphertextBase64Url: "ciphertext",
+          authTagBase64Url: "tag",
+        },
+      },
+    });
+  });
+
+  it("does not save restored backup metadata when confidential restore fails", async () => {
+    importConfidentialWalletBackupMock.mockRejectedValueOnce(
+      new Error("confidential bundle rejected"),
+    );
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const backupPayload = JSON.stringify(
+      buildWalletBackupPayload({
+        mnemonic: VALID_MNEMONIC,
+        wordCount: 12,
+        target: "manual",
+        createdAt: "2026-03-29T00:00:00.000Z",
+        displayName: "Backup Alice",
+        domain: "backup-domain",
+        confidentialWallet: {
+          schema: "iroha-demo-confidential-wallet-backup/v2",
+          chainId: TAIRA_CHAIN_PRESET.connection.chainId,
+          accountId: "alice@backup-domain",
+          scanWatermarkBlock: 42,
+          stateBox: {
+            kdf: "HKDF-SHA256",
+            cipher: "AES-256-GCM",
+            saltBase64Url: "salt",
+            ivBase64Url: "iv",
+            ciphertextBase64Url: "ciphertext",
+            authTagBase64Url: "tag",
+          },
+        },
+      }),
+    );
+    const backupFile = new File([backupPayload], "iroha-backup.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(backupFile, "text", {
+      configurable: true,
+      value: () => Promise.resolve(backupPayload),
+    });
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    const fileInput = wrapper.find('input[type="file"]');
+    setInputFiles(fileInput.element as HTMLInputElement, [backupFile]);
+    await fileInput.trigger("change");
+    await flushPromises();
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    expect(storeAccountSecretMock).toHaveBeenCalledWith({
+      accountId: "alice@backup-domain",
+      privateKeyHex: VALID_MNEMONIC_PRIVATE_KEY_HEX,
+    });
+    expect(importConfidentialWalletBackupMock).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("confidential bundle rejected");
+    expect(routerPushMock).not.toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBeNull();
+  });
+
+  it("does not apply backup metadata when imported recovery data is invalid", async () => {
+    const wrapper = mountView();
+    const invalidBackupPayload = JSON.stringify({
+      mnemonic:
+        "invalid invalid invalid invalid invalid invalid invalid invalid invalid invalid invalid invalid",
+      displayName: "Backup Alice",
+      domain: "backup-domain",
+    });
+    const backupFile = new File([invalidBackupPayload], "iroha-backup.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(backupFile, "text", {
+      configurable: true,
+      value: () => Promise.resolve(invalidBackupPayload),
+    });
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    const fileInput = wrapper.find('input[type="file"]');
+    expect(fileInput.exists()).toBe(true);
+    setInputFiles(fileInput.element as HTMLInputElement, [backupFile]);
+    await fileInput.trigger("change");
+    await flushPromises();
+    await flushPromises();
+
+    const inputs = getTextInputs(wrapper);
+    expect(wrapper.text()).toContain(t("Invalid recovery phrase"));
+    expect((inputs[0].element as HTMLInputElement).value).toBe("");
+    expect((inputs[1].element as HTMLInputElement).value).toBe("default");
+    expect(derivePublicKeyMock).not.toHaveBeenCalled();
+    expect(useSessionStore().hasAccount).toBe(false);
+  });
+
+  it("validates restore phrases before deriving or saving", async () => {
+    const wrapper = mountView();
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain(t("Enter a recovery phrase."));
+    expect(derivePublicKeyMock).not.toHaveBeenCalled();
+
+    const textarea = wrapper.find("textarea");
+    await textarea.setValue("one two three");
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain(
+      t("Recovery phrase must contain 12 or 24 words."),
+    );
+    expect(derivePublicKeyMock).not.toHaveBeenCalled();
+
+    await textarea.setValue(
+      "invalid invalid invalid invalid invalid invalid invalid invalid invalid invalid invalid invalid",
+    );
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(t("Invalid recovery phrase"));
+    expect(derivePublicKeyMock).not.toHaveBeenCalled();
+    expect(useSessionStore().hasAccount).toBe(false);
+  });
+
+  it("restores a 24-word recovery phrase", async () => {
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const expectedPrivateKeyHex = mnemonicToPrivateKeyHex(
+      VALID_24_WORD_MNEMONIC,
+    );
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    await wrapper.find("textarea").setValue(VALID_24_WORD_MNEMONIC);
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    expect(derivePublicKeyMock).toHaveBeenCalledWith(expectedPrivateKeyHex);
+    expect(session.activeAccount?.hasStoredSecret).toBe(true);
+  });
+
+  it("surfaces bridge failures while deriving a restored wallet", async () => {
+    derivePublicKeyMock.mockRejectedValueOnce(new Error("bridge down"));
+
+    const wrapper = mountView();
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    await wrapper.find("textarea").setValue(VALID_MNEMONIC);
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("bridge down");
+    expect(
+      wrapper
+        .findAll("button")
+        .some((button) => button.text() === t("Restore wallet")),
+    ).toBe(false);
+    expect(useSessionStore().hasAccount).toBe(false);
+  });
+
+  it("does not expose advanced on-chain onboarding controls on first launch", async () => {
+    const wrapper = mountView();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[0].setValue("Alice");
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain(t("Register on-chain alias"));
+    expect(onboardAccountMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores stale onboarding bridge mocks and still saves locally", async () => {
+    onboardAccountMock.mockRejectedValueOnce(
+      new Error("Onboarding bridge should not be called"),
+    );
+
+    const wrapper = mountView();
+    const session = useSessionStore();
+    const inputs = getTextInputs(wrapper);
+
+    await inputs[0].setValue("Alice");
+    await inputs[1].setValue("flowers");
+    await getButtonByText(wrapper, t("Generate recovery phrase")).trigger(
+      "click",
+    );
+    await flushPromises();
+
+    await wrapper.find('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    await getButtonByText(wrapper, t("Save identity")).trigger("click");
+    await flushPromises();
+
+    expect(onboardAccountMock).not.toHaveBeenCalled();
+    expect(routerPushMock).toHaveBeenCalledWith("/wallet");
+    expect(session.activeAccountId).toBe("alice@flowers");
+    expect(session.activeAccount?.localOnly).toBe(true);
+    expect(session.activeAccount?.hasStoredSecret).toBe(true);
+  });
+
+  it("restores from the saved-wallet layout and updates an existing account entry", async () => {
+    const wrapper = mountView({
+      savedAccount: {
+        displayName: "Existing Alice",
+        domain: "default",
+        accountId: "alice@default",
+        publicKeyHex: "11".repeat(32),
+        privateKeyHex: "22".repeat(32),
+        localOnly: false,
+      },
+    });
+    const session = useSessionStore();
+
+    expect(session.accounts).toHaveLength(1);
+
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    const textarea = wrapper.find("textarea");
+    await textarea.setValue(VALID_MNEMONIC);
+    await getButtonByText(wrapper, t("Load recovery phrase")).trigger("click");
+    await flushPromises();
+    await getButtonByText(wrapper, t("Restore wallet")).trigger("click");
+    await flushPromises();
+
+    expect(onboardAccountMock).not.toHaveBeenCalled();
+    expect(session.accounts).toHaveLength(1);
+    expect(session.activeAccountId).toBe("alice@default");
+    expect(session.activeAccount?.displayName).toBe("");
+    expect(session.activeAccount?.hasStoredSecret).toBe(true);
+    expect(session.activeAccount?.localOnly).toBe(true);
+  });
+});

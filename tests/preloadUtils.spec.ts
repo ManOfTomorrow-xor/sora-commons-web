@@ -1,0 +1,626 @@
+import { describe, expect, it } from "vitest";
+import {
+  confidentialModeSupportsShield,
+  extractApiErrorDetail,
+  formatOnboardingError,
+  isPositiveWholeAmount,
+  normalizeAccountAssetListPayload,
+  normalizeBaseUrl,
+  normalizeConfidentialAssetPolicyPayload,
+  normalizeExplorerAccountQrPayload,
+  normalizeGovernanceCitizenCountPayload,
+  normalizeGovernanceCouncilCurrentPayload,
+  normalizePublicLaneRewardsPayload,
+  normalizePublicLaneStakePayload,
+  normalizePublicLaneValidatorsPayload,
+  readApiErrorDetail,
+  readNexusUnbondingDelayMs,
+  sanitizeFetchHeaders,
+  sanitizeFetchInit,
+  stripConfidentialFeeSponsor,
+} from "../electron/preload-utils";
+
+describe("preload utils", () => {
+  it("normalizes Torii base URLs", () => {
+    expect(normalizeBaseUrl(" https://torii.example/ ")).toBe(
+      "https://torii.example",
+    );
+    expect(normalizeBaseUrl("http://127.0.0.1:8080")).toBe(
+      "http://127.0.0.1:8080",
+    );
+    expect(() => normalizeBaseUrl("127.0.0.1:8080")).toThrow(
+      "Torii URL must include http or https scheme",
+    );
+  });
+
+  it("strips fee sponsorship from confidential relay metadata while preserving gas asset hints", () => {
+    expect(
+      stripConfidentialFeeSponsor({
+        fee_sponsor: "testu123",
+        gas_asset_id: "6TEAJqbb8oEPmLncoNiMRbLEK6tw",
+        gas_limit: 123,
+      }),
+    ).toEqual({
+      gas_asset_id: "6TEAJqbb8oEPmLncoNiMRbLEK6tw",
+      gas_limit: 123,
+    });
+    expect(stripConfidentialFeeSponsor(undefined)).toBeUndefined();
+    expect(
+      stripConfidentialFeeSponsor({
+        fee_sponsor: "testu123",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("formats onboarding 403 errors with explicit UAID guidance", () => {
+    expect(
+      formatOnboardingError({
+        status: 403,
+        statusText: "Forbidden",
+        detail: "torii.onboarding.enabled is false",
+      }),
+    ).toBe(
+      "Alias registration failed with status 403 (Forbidden): UAID alias registration is disabled on this Torii endpoint. Save the wallet locally instead, or use authority registration if you need the account on-chain. Detail: torii.onboarding.enabled is false",
+    );
+    expect(
+      formatOnboardingError({
+        status: 403,
+        statusText: "Forbidden",
+      }),
+    ).toBe(
+      "Alias registration failed with status 403 (Forbidden): UAID alias registration is disabled on this Torii endpoint. Save the wallet locally instead, or use authority registration if you need the account on-chain.",
+    );
+  });
+
+  it("formats non-403 onboarding errors using response details when present", () => {
+    expect(
+      formatOnboardingError({
+        status: 500,
+        statusText: "Internal Server Error",
+        detail: "unexpected backend failure",
+      }),
+    ).toBe(
+      "Alias registration failed with status 500 (Internal Server Error): unexpected backend failure",
+    );
+    expect(
+      formatOnboardingError({
+        status: 429,
+        statusText: "Too Many Requests",
+      }),
+    ).toBe("Alias registration failed with status 429 (Too Many Requests)");
+  });
+
+  it("normalizes fetch headers from multiple input formats", () => {
+    const fromHeaders = sanitizeFetchHeaders(
+      new Headers({
+        Accept: "application/json",
+      }),
+    );
+    expect(Array.isArray(fromHeaders)).toBe(true);
+    expect(fromHeaders).toContainEqual(["accept", "application/json"]);
+
+    expect(
+      sanitizeFetchHeaders([
+        ["x-int", 42],
+        ["x-bool", false],
+      ]),
+    ).toEqual([
+      ["x-int", "42"],
+      ["x-bool", "false"],
+    ]);
+
+    expect(
+      sanitizeFetchHeaders({
+        "x-ok": 123,
+        "x-null": null,
+        "x-undef": undefined,
+      }),
+    ).toEqual({
+      "x-ok": "123",
+    });
+  });
+
+  it("sanitizes fetch init headers without mutating passthroughs", () => {
+    expect(sanitizeFetchInit(undefined)).toBeUndefined();
+
+    const passthrough = { method: "GET" } as const;
+    expect(sanitizeFetchInit(passthrough)).toBe(passthrough);
+
+    const init = {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "x-version": 2,
+        "x-ignored": undefined,
+      },
+    } as unknown as Parameters<typeof fetch>[1];
+    const out = sanitizeFetchInit(init);
+    expect(out).not.toBe(init);
+    expect(out).toEqual({
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "x-version": "2",
+      },
+    });
+  });
+
+  it("extracts enum-style API error details", () => {
+    expect(
+      extractApiErrorDetail({
+        NotPermitted: "faucet pow vrf seed unavailable",
+      }),
+    ).toBe("faucet pow vrf seed unavailable");
+    expect(
+      extractApiErrorDetail({
+        QueryFailed: {
+          Conversion: "invalid account id literal",
+        },
+      }),
+    ).toBe("invalid account id literal");
+    expect(
+      extractApiErrorDetail({
+        message: "Faucet puzzle failed.",
+        details: {
+          NotPermitted: "faucet pow vrf seed unavailable",
+        },
+      }),
+    ).toBe("faucet pow vrf seed unavailable");
+  });
+
+  it("reads API error details from JSON and plain-text responses", async () => {
+    const jsonResponse = new Response(
+      JSON.stringify({
+        NotPermitted: "Account faucet disabled",
+      }),
+      {
+        status: 403,
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+    );
+    const wrappedJsonResponse = new Response(
+      JSON.stringify({
+        message: "Faucet puzzle failed.",
+        details: {
+          NotPermitted: "Account faucet disabled",
+        },
+      }),
+      {
+        status: 403,
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+    );
+    const textResponse = new Response("plain failure", {
+      status: 400,
+    });
+
+    await expect(readApiErrorDetail(jsonResponse)).resolves.toBe(
+      "Account faucet disabled",
+    );
+    await expect(readApiErrorDetail(wrappedJsonResponse)).resolves.toBe(
+      "Account faucet disabled",
+    );
+    await expect(readApiErrorDetail(textResponse)).resolves.toBe(
+      "plain failure",
+    );
+  });
+
+  it("reads HTML gateway API errors without leaking markup", async () => {
+    const htmlResponse = new Response(
+      "<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx/1.29.8</center></body></html>",
+      {
+        status: 502,
+        statusText: "Bad Gateway",
+        headers: {
+          "content-type": "text/html",
+        },
+      },
+    );
+
+    await expect(readApiErrorDetail(htmlResponse)).resolves.toBe(
+      "502 Bad Gateway",
+    );
+  });
+
+  it("uses reject-code headers and extracts readable Norito error details", async () => {
+    const noritoResponse = new Response(
+      new Uint8Array([0x4e, 0x52, 0x54, 0x30, 0x00, 0x00, 0x00, 0x00]),
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/x-norito",
+          "x-iroha-reject-code": "ERR_INVALID_SINGULAR_PARAMETERS",
+        },
+      },
+    );
+    const noritoResponseWithoutHeader = new Response(
+      new Uint8Array([0x4e, 0x52, 0x54, 0x30, 0x00, 0x00, 0x00, 0x00]),
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/x-norito",
+        },
+      },
+    );
+    const noritoResponseWithDetail = new Response(
+      new Uint8Array([
+        ...Buffer.from("NRT0", "utf8"),
+        0x00,
+        0x00,
+        0xff,
+        0x18,
+        0x17,
+        ...Buffer.from("Account faucet disabled", "utf8"),
+      ]),
+      {
+        status: 403,
+        headers: {
+          "content-type": "application/x-norito",
+        },
+      },
+    );
+
+    await expect(readApiErrorDetail(noritoResponse)).resolves.toBe(
+      "ERR_INVALID_SINGULAR_PARAMETERS",
+    );
+    await expect(readApiErrorDetail(noritoResponseWithDetail)).resolves.toBe(
+      "Account faucet disabled",
+    );
+    await expect(readApiErrorDetail(noritoResponseWithoutHeader)).resolves.toBe(
+      "",
+    );
+  });
+
+  it("strips unreadable prefixes from plain-text API errors", async () => {
+    const textResponse = new Response(
+      "ERR_UNEXPECTED_NETWORK_PREFIX — NRT0`\uFFFD6W\uFFFD5 invalid account_id `sorauExample` : ERR_UNEXPECTED_NETWORK_PREFIX",
+      {
+        status: 400,
+      },
+    );
+
+    await expect(readApiErrorDetail(textResponse)).resolves.toBe(
+      "ERR_UNEXPECTED_NETWORK_PREFIX — invalid account_id `sorauExample` : ERR_UNEXPECTED_NETWORK_PREFIX",
+    );
+  });
+
+  it("maps explorer QR snake_case payloads to renderer contract fields", () => {
+    const normalized = normalizeExplorerAccountQrPayload({
+      canonical_id: "testuSampleCanonical",
+      literal: "testuSampleLiteral",
+      network_prefix: 369,
+      error_correction: "M",
+      modules: 33,
+      qr_version: 4,
+      svg: "<svg/>",
+    });
+
+    expect(normalized).toEqual({
+      canonicalId: "testuSampleCanonical",
+      literal: "testuSampleLiteral",
+      networkPrefix: 369,
+      errorCorrection: "M",
+      modules: 33,
+      qrVersion: 4,
+      svg: "<svg/>",
+    });
+
+    expect(() =>
+      normalizeExplorerAccountQrPayload({
+        canonical_id: "testuSampleCanonical",
+        svg: "<svg/>",
+      }),
+    ).toThrow("Explorer QR response was missing required fields.");
+  });
+
+  it("normalizes account asset list payloads from legacy and split-field responses", () => {
+    expect(
+      normalizeAccountAssetListPayload({
+        items: [
+          {
+            asset_id: "xor#sora#alice",
+            quantity: "25000",
+          },
+        ],
+        total: 1,
+      }),
+    ).toEqual({
+      items: [
+        {
+          asset_id: "xor#sora#alice",
+          quantity: "25000",
+        },
+      ],
+      total: 1,
+    });
+
+    expect(
+      normalizeAccountAssetListPayload({
+        items: [
+          {
+            account_id: "sorauAlice",
+            asset: "5PeSrQmLNwwKtruJvDZrbrm9RuMw",
+            asset_alias: null,
+            asset_name: "Localnet Fee",
+            quantity: "25000",
+          },
+        ],
+        total: 1,
+      }),
+    ).toEqual({
+      items: [
+        {
+          asset_id: "5PeSrQmLNwwKtruJvDZrbrm9RuMw#sorauAlice",
+          quantity: "25000",
+          asset_name: "Localnet Fee",
+          asset_definition_id: "5PeSrQmLNwwKtruJvDZrbrm9RuMw",
+        },
+      ],
+      total: 1,
+    });
+
+    expect(
+      normalizeAccountAssetListPayload({
+        items: [
+          {
+            account_id: "testuAlice",
+            asset_definition_id: "61CtjvNd9T3THAR65GsMVHr82Bjc",
+            quantity: "25000",
+          },
+        ],
+        total: 1,
+      }),
+    ).toEqual({
+      items: [
+        {
+          asset_id: "61CtjvNd9T3THAR65GsMVHr82Bjc#testuAlice",
+          quantity: "25000",
+          asset_definition_id: "61CtjvNd9T3THAR65GsMVHr82Bjc",
+        },
+      ],
+      total: 1,
+    });
+  });
+
+  it("preserves account asset aliases for renderer labels", () => {
+    expect(
+      normalizeAccountAssetListPayload({
+        items: [
+          {
+            account_id: "sorauAlice",
+            asset: "6TEAJqbb8oEPmLncoNiMRbLEK6tw",
+            asset_alias: "@xor",
+            quantity: "42",
+          },
+        ],
+      }),
+    ).toEqual({
+      items: [
+        {
+          asset_id: "6TEAJqbb8oEPmLncoNiMRbLEK6tw#sorauAlice",
+          quantity: "42",
+          asset_alias: "xor",
+          asset_definition_id: "6TEAJqbb8oEPmLncoNiMRbLEK6tw",
+        },
+      ],
+      total: 1,
+    });
+  });
+
+  it("normalizes current governance council payloads without forcing Vrf derivation", () => {
+    expect(
+      normalizeGovernanceCouncilCurrentPayload({
+        epoch: "77",
+        members: [{ account_id: "testuAlice" }, "testuBob"],
+        alternates: [{ accountId: "testuCarol" }],
+        candidate_count: "3",
+        verified: 2,
+        derived_by: "Fallback",
+      }),
+    ).toEqual({
+      epoch: 77,
+      members: [{ account_id: "testuAlice" }, { account_id: "testuBob" }],
+      alternates: [{ account_id: "testuCarol" }],
+      candidate_count: 3,
+      verified: 2,
+      derived_by: "Fallback",
+    });
+  });
+
+  it("normalizes exact governance citizen count payloads", () => {
+    expect(
+      normalizeGovernanceCitizenCountPayload({
+        total: "12",
+      }),
+    ).toEqual({
+      total: 12,
+      endpointAvailable: true,
+    });
+    expect(normalizeGovernanceCitizenCountPayload(null, false)).toEqual({
+      total: null,
+      endpointAvailable: false,
+    });
+  });
+
+  it("defaults missing governance council derivation to Vrf but rejects empty values", () => {
+    expect(
+      normalizeGovernanceCouncilCurrentPayload({
+        epoch: 1,
+        members: [],
+      }),
+    ).toEqual({
+      epoch: 1,
+      members: [],
+      alternates: [],
+      candidate_count: 0,
+      verified: 0,
+      derived_by: "Vrf",
+    });
+
+    expect(() =>
+      normalizeGovernanceCouncilCurrentPayload({
+        epoch: 1,
+        members: [],
+        derived_by: "",
+      }),
+    ).toThrow(
+      "governance council current response.derived_by must be a non-empty string",
+    );
+  });
+
+  it("normalizes public lane validators payloads", () => {
+    const normalized = normalizePublicLaneValidatorsPayload({
+      lane_id: 7,
+      total: 1,
+      items: [
+        {
+          lane_id: 7,
+          validator: "validator@wonderland",
+          peer_id: "peer:validator",
+          stake_account: "validator@wonderland",
+          total_stake: "1000",
+          self_stake: "250",
+          status: {
+            type: "Active",
+            activates_at_epoch: null,
+            reason: null,
+            releases_at_ms: null,
+            slash_id: null,
+          },
+          activation_epoch: 3,
+          activation_height: 120,
+          last_reward_epoch: 8,
+          metadata: {
+            endpoint: "https://node.example",
+          },
+        },
+      ],
+    });
+
+    expect(normalized.lane_id).toBe(7);
+    expect(normalized.items[0].validator).toBe("validator@wonderland");
+    expect(normalized.items[0].peer_id).toBe("peer:validator");
+    expect(normalized.items[0].status.type).toBe("Active");
+    expect(normalized.items[0].activation_epoch).toBe(3);
+  });
+
+  it("normalizes public lane stake and rewards payloads", () => {
+    const stake = normalizePublicLaneStakePayload({
+      laneId: 4,
+      total: 1,
+      items: [
+        {
+          laneId: 4,
+          validator: "validator@wonderland",
+          staker: "alice@wonderland",
+          bonded: "42",
+          metadata: {},
+          pendingUnbonds: [
+            {
+              requestId: "abc123",
+              amount: "10",
+              releaseAtMs: 170000,
+            },
+          ],
+        },
+      ],
+    });
+    const rewards = normalizePublicLaneRewardsPayload({
+      lane_id: 4,
+      total: 1,
+      items: [
+        {
+          lane_id: 4,
+          account: "alice@wonderland",
+          asset: "xor#wonderland",
+          last_claimed_epoch: 2,
+          pending_through_epoch: 5,
+          amount: "7.5",
+        },
+      ],
+    });
+
+    expect(stake.items[0].pending_unbonds[0].request_id).toBe("abc123");
+    expect(stake.items[0].pending_unbonds[0].release_at_ms).toBe(170000);
+    expect(rewards.items[0].asset).toBe("xor#wonderland");
+    expect(rewards.items[0].pending_through_epoch).toBe(5);
+  });
+
+  it("normalizes confidential asset policy payloads", () => {
+    const normalized = normalizeConfidentialAssetPolicyPayload({
+      asset_id: "norito:abcdef0123456789",
+      block_height: 41,
+      current_mode: "TransparentOnly",
+      effective_mode: "Convertible",
+      allow_shield: "true",
+      allow_unshield: false,
+      vk_transfer: "halo2/ipa::vk_transfer",
+      vk_unshield: "halo2/ipa::vk_unshield",
+      vk_shield: "halo2/ipa::vk_shield",
+      vk_set_hash: "AA".repeat(32),
+      poseidon_params_id: 7,
+      pedersen_params_id: 9,
+      pending_transition: {
+        transition_id: "BB".repeat(32),
+        previous_mode: "TransparentOnly",
+        new_mode: "ShieldedOnly",
+        effective_height: 55,
+        conversion_window: 10,
+        window_open_height: 45,
+      },
+    });
+
+    expect(normalized.asset_id).toBe("norito:abcdef0123456789");
+    expect(normalized.effective_mode).toBe("Convertible");
+    expect(normalized.allow_shield).toBe(true);
+    expect(normalized.allow_unshield).toBe(false);
+    expect(normalized.vk_transfer).toBe("halo2/ipa::vk_transfer");
+    expect(normalized.vk_unshield).toBe("halo2/ipa::vk_unshield");
+    expect(normalized.vk_shield).toBe("halo2/ipa::vk_shield");
+    expect(normalized.pending_transition?.effective_height).toBe(55);
+    expect(normalized.pending_transition?.conversion_window).toBe(10);
+  });
+
+  it("detects which confidential modes support shielding", () => {
+    expect(confidentialModeSupportsShield("ShieldedOnly")).toBe(true);
+    expect(confidentialModeSupportsShield("convertible")).toBe(true);
+    expect(confidentialModeSupportsShield("zk_native")).toBe(true);
+    expect(confidentialModeSupportsShield("TransparentOnly")).toBe(false);
+    expect(confidentialModeSupportsShield(undefined)).toBe(false);
+  });
+
+  it("accepts only positive whole-number shielding amounts", () => {
+    expect(isPositiveWholeAmount("1")).toBe(true);
+    expect(isPositiveWholeAmount("25")).toBe(true);
+    expect(isPositiveWholeAmount(" 7 ")).toBe(true);
+
+    expect(isPositiveWholeAmount("0")).toBe(false);
+    expect(isPositiveWholeAmount("10.5")).toBe(false);
+    expect(isPositiveWholeAmount("-4")).toBe(false);
+    expect(isPositiveWholeAmount("abc")).toBe(false);
+  });
+
+  it("extracts nexus unbonding delay from configuration payloads", () => {
+    expect(
+      readNexusUnbondingDelayMs({
+        nexus: {
+          staking: {
+            unbonding_delay_ms: 60000,
+          },
+        },
+      }),
+    ).toBe(60000);
+
+    expect(() =>
+      readNexusUnbondingDelayMs({
+        nexus: {
+          staking: {},
+        },
+      }),
+    ).toThrow("configuration.nexus.staking.unbonding_delay_ms");
+  });
+});

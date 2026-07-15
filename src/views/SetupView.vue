@@ -1,0 +1,613 @@
+<template>
+  <div class="setup-shell">
+    <section class="card setup-connection-card">
+      <header class="card-header">
+        <h2>{{ t("Torii Connection") }}</h2>
+        <span class="status-pill" :class="pingIndicator.class">
+          {{ pingIndicator.label }}
+        </span>
+      </header>
+      <div class="chain-picker">
+        <div class="preset-row">
+          <div class="preset-chip active fixed" role="status">
+            <span class="chip-title">{{ activeNetworkLabel }}</span>
+            <span class="chip-sub">{{ activeNetworkDescription }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label>
+          {{ t("Torii URL") }}
+          <input v-model="connectionForm.toriiUrl" readonly />
+        </label>
+        <label>
+          {{ t("Chain ID") }}
+          <input v-model="connectionForm.chainId" readonly />
+        </label>
+        <label>
+          {{ t("Asset Definition ID") }}
+          <input :value="displayAssetDefinitionId" readonly />
+        </label>
+        <label>
+          {{ t("Network Prefix") }}
+          <input
+            v-model.number="connectionForm.networkPrefix"
+            type="number"
+            min="0"
+            max="16383"
+            readonly
+          />
+        </label>
+      </div>
+      <details class="setup-asset-literal">
+        <summary>{{ t("Edit raw asset ID") }}</summary>
+        <label>
+          {{ t("Raw asset ID") }}
+          <input
+            v-model="assetDefinitionDraft"
+            data-testid="raw-asset-id-input"
+          />
+        </label>
+      </details>
+      <div class="actions">
+        <button :disabled="pingLoading" @click="handlePing">
+          {{ t("Check health") }}
+        </button>
+        <button class="secondary" @click="saveConnection">
+          {{ t("Save") }}
+        </button>
+      </div>
+      <p v-if="pingMessage" class="helper">{{ pingMessage }}</p>
+    </section>
+
+    <section class="card setup-identity-card">
+      <header class="card-header">
+        <h2>{{ t("Key Material") }}</h2>
+      </header>
+      <div class="form-grid">
+        <label>
+          {{ t("Display Name (local only, not on-chain)") }}
+          <input v-model="userForm.displayName" />
+        </label>
+        <label>
+          {{ t("Domain") }}
+          <input v-model="userForm.domain" />
+        </label>
+        <label>
+          {{ t("Private Key (hex)") }}
+          <textarea v-model="userForm.privateKeyHex" rows="2"></textarea>
+        </label>
+        <label>
+          {{ t("Public Key") }}
+          <textarea
+            v-model="userForm.publicKeyHex"
+            rows="2"
+            readonly
+          ></textarea>
+        </label>
+        <label>
+          {{ t("Canonical I105 Account ID") }}
+          <input
+            :value="
+              userForm.i105DefaultAccountId ||
+              userForm.i105AccountId ||
+              userForm.accountId
+            "
+            readonly
+          />
+        </label>
+      </div>
+      <p class="helper">
+        {{
+          t(
+            "The domain label defaults to {domain}. It is a neutral SDK label for local derivation, not an on-chain dataspace alias.",
+            {
+              domain: t("default"),
+            },
+          )
+        }}
+      </p>
+      <div class="actions">
+        <button :disabled="generating" @click="handleGenerate">
+          {{ t("Generate pair") }}
+        </button>
+        <button
+          class="secondary"
+          :disabled="!userForm.privateKeyHex"
+          @click="handleDerivePublic"
+        >
+          {{ t("Derive from private key") }}
+        </button>
+        <button class="secondary" @click="saveUser">
+          {{ t("Save identity") }}
+        </button>
+        <button
+          class="secondary"
+          @click="showAdvancedRegistration = !showAdvancedRegistration"
+        >
+          {{ showAdvancedRegistration ? t("Hide advanced") : t("Advanced") }}
+        </button>
+      </div>
+      <p v-if="registerMessage && !showAdvancedRegistration" class="helper">
+        {{ registerMessage }}
+      </p>
+    </section>
+
+    <section v-if="showAdvancedRegistration" class="card setup-register-card">
+      <header class="card-header">
+        <h2>{{ t("Create on-chain account") }}</h2>
+        <p class="helper">
+          {{
+            t("Requires authority credentials to create the account on-chain.")
+          }}
+        </p>
+      </header>
+      <div class="form-grid">
+        <label>
+          {{ t("Authority Account ID") }}
+          <input v-model="authorityForm.accountId" />
+        </label>
+        <label>
+          {{ t("Authority Private Key (hex)") }}
+          <textarea v-model="authorityForm.privateKeyHex" rows="2"></textarea>
+        </label>
+        <label>
+          {{ t("Account Metadata (JSON)") }}
+          <textarea v-model="metadataInput" rows="4"></textarea>
+        </label>
+      </div>
+      <p class="transaction-fee-note">
+        <span>{{ t("Fee") }}</span>
+        <strong>{{
+          formatTransactionFee(
+            transactionFeeHintForEndpoint(connectionForm.toriiUrl),
+            t,
+          )
+        }}</strong>
+      </p>
+      <div class="actions">
+        <button :disabled="registering || !canRegister" @click="handleRegister">
+          {{ registering ? t("Submitting…") : t("Create on-chain account") }}
+        </button>
+        <button class="secondary" @click="saveAuthority">
+          {{ t("Save authority") }}
+        </button>
+      </div>
+      <p v-if="registerMessage" class="helper">{{ registerMessage }}</p>
+    </section>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, reactive, ref, watch } from "vue";
+import { z } from "zod";
+import { useAppI18n } from "@/composables/useAppI18n";
+import { useSessionStore } from "@/stores/session";
+import {
+  deriveAccountAddress,
+  derivePublicKey,
+  generateKeyPair,
+  isSecureVaultAvailable,
+  pingTorii,
+  registerAccount,
+  storeAccountSecret,
+} from "@/services/iroha";
+import { CHAIN_PRESETS, DEFAULT_CHAIN_PRESET } from "@/constants/chains";
+import { formatAssetDefinitionLabel } from "@/utils/assetId";
+import { toUserFacingErrorMessage } from "@/utils/errorMessage";
+import {
+  appendTransactionFee,
+  formatTransactionFee,
+  transactionFeeHintForEndpoint,
+} from "@/utils/transactionFee";
+
+type PingState = "idle" | "ok" | "error";
+
+const session = useSessionStore();
+const { t } = useAppI18n();
+const DEFAULT_DOMAIN_LABEL = "default";
+
+const connectionForm = reactive({ ...session.connection });
+const assetDefinitionDraft = ref("");
+const activeNetworkPreset = computed(() =>
+  CHAIN_PRESETS.find(
+    (preset) =>
+      preset.connection.toriiUrl === connectionForm.toriiUrl &&
+      preset.connection.chainId === connectionForm.chainId &&
+      preset.connection.networkPrefix === connectionForm.networkPrefix,
+  ),
+);
+const activeNetworkLabel = computed(
+  () => activeNetworkPreset.value?.label ?? t("Custom endpoint"),
+);
+const activeNetworkDescription = computed(
+  () =>
+    activeNetworkPreset.value?.description ??
+    t("Settings-managed network profile."),
+);
+const displayAssetDefinitionId = computed(() =>
+  formatAssetDefinitionLabel(
+    connectionForm.assetDefinitionId,
+    t("Asset not set"),
+  ),
+);
+const emptyAccount = () => ({
+  displayName: "",
+  domain: DEFAULT_DOMAIN_LABEL,
+  accountId: "",
+  i105AccountId: "",
+  i105DefaultAccountId: "",
+  publicKeyHex: "",
+  privateKeyHex: "",
+  hasStoredSecret: false,
+});
+const userForm = reactive({
+  ...emptyAccount(),
+  ...(session.activeAccount ?? {}),
+});
+const authorityForm = reactive(
+  Object.assign(
+    {
+      accountId: "",
+      privateKeyHex: "",
+      hasStoredSecret: false,
+    },
+    session.authority,
+  ),
+);
+const metadataInput = ref(
+  JSON.stringify(
+    { nickname: session.activeAccount?.displayName || "" },
+    null,
+    2,
+  ),
+);
+
+const pingState = ref<PingState>("idle");
+const pingMessage = ref("");
+const pingLoading = ref(false);
+const generating = ref(false);
+const registering = ref(false);
+const registerMessage = ref("");
+const showAdvancedRegistration = ref(false);
+
+watch(
+  () => session.connection,
+  (value) => {
+    const nextConnection = {
+      ...DEFAULT_CHAIN_PRESET.connection,
+      toriiUrl: value.toriiUrl || DEFAULT_CHAIN_PRESET.connection.toriiUrl,
+      chainId: value.chainId || DEFAULT_CHAIN_PRESET.connection.chainId,
+      networkPrefix:
+        value.networkPrefix ?? DEFAULT_CHAIN_PRESET.connection.networkPrefix,
+      assetDefinitionId:
+        value.assetDefinitionId ||
+        DEFAULT_CHAIN_PRESET.connection.assetDefinitionId,
+    };
+    Object.assign(connectionForm, nextConnection);
+    assetDefinitionDraft.value = "";
+  },
+  { deep: true, immediate: true },
+);
+
+watch(
+  () => session.activeAccount,
+  (value) => Object.assign(userForm, { ...emptyAccount(), ...(value ?? {}) }),
+  { deep: true },
+);
+
+watch(
+  () => session.activeAccountId,
+  () => {
+    metadataInput.value = JSON.stringify(
+      { nickname: session.activeAccount?.displayName || "" },
+      null,
+      2,
+    );
+  },
+);
+
+watch(
+  () => session.authority,
+  (value) => Object.assign(authorityForm, value),
+  { deep: true },
+);
+
+watch(
+  () => [userForm.domain, userForm.publicKeyHex],
+  () => {
+    if (!userForm.publicKeyHex || !userForm.domain) return;
+    try {
+      const summary = deriveAccountAddress({
+        domain: userForm.domain,
+        publicKeyHex: userForm.publicKeyHex,
+        networkPrefix: connectionForm.networkPrefix,
+      });
+      Object.assign(userForm, summary);
+    } catch (error) {
+      console.warn("Failed to derive address", error);
+    }
+  },
+  { deep: true },
+);
+
+const pingIndicator = computed(() => {
+  switch (pingState.value) {
+    case "ok":
+      return { label: t("Healthy"), class: "status-pill ok" };
+    case "error":
+      return { label: t("Offline"), class: "status-pill error" };
+    default:
+      return { label: t("Idle"), class: "status-pill" };
+  }
+});
+
+const authorityHasSavedSecret = computed(() =>
+  Boolean(
+    authorityForm.accountId.trim() &&
+      authorityForm.accountId.trim() === session.authority.accountId.trim() &&
+      session.authority.hasStoredSecret,
+  ),
+);
+
+const canRegister = computed(() =>
+  Boolean(
+    connectionForm.toriiUrl &&
+      connectionForm.chainId &&
+      userForm.accountId &&
+      authorityForm.accountId &&
+      (authorityForm.privateKeyHex.trim() || authorityHasSavedSecret.value),
+  ),
+);
+
+const metadataSchema = z.record(z.any()).catch(() => ({}));
+
+const buildConnectionFromForm = (includeAssetDraft = false) => {
+  const nextAssetDefinitionId =
+    (includeAssetDraft ? assetDefinitionDraft.value.trim() : "") ||
+    connectionForm.assetDefinitionId ||
+    DEFAULT_CHAIN_PRESET.connection.assetDefinitionId;
+  return {
+    toriiUrl:
+      connectionForm.toriiUrl || DEFAULT_CHAIN_PRESET.connection.toriiUrl,
+    chainId: connectionForm.chainId || DEFAULT_CHAIN_PRESET.connection.chainId,
+    networkPrefix:
+      connectionForm.networkPrefix ??
+      DEFAULT_CHAIN_PRESET.connection.networkPrefix,
+    assetDefinitionId: nextAssetDefinitionId,
+  };
+};
+
+const syncConnectionFormToSession = () => {
+  const nextConnection = buildConnectionFromForm();
+  Object.assign(connectionForm, nextConnection);
+  session.updateConnection(nextConnection);
+};
+
+const saveConnection = () => {
+  const nextConnection = buildConnectionFromForm(true);
+  Object.assign(connectionForm, nextConnection);
+  assetDefinitionDraft.value = "";
+  session.updateConnection(nextConnection);
+  session.persistState();
+};
+
+const saveUser = async () => {
+  if (!userForm.accountId || !userForm.privateKeyHex.trim()) {
+    registerMessage.value = t("Enter an identity private key first.");
+    return;
+  }
+  const vaultAvailable = await isSecureVaultAvailable().catch(() => false);
+  if (!vaultAvailable) {
+    registerMessage.value = t(
+      "Secure OS-backed key storage is unavailable on this device.",
+    );
+    return;
+  }
+  try {
+    await storeAccountSecret({
+      accountId: userForm.accountId,
+      privateKeyHex: userForm.privateKeyHex,
+    });
+  } catch (error) {
+    registerMessage.value = toUserFacingErrorMessage(
+      error,
+      t("Secure OS-backed key storage is unavailable on this device."),
+    );
+    return;
+  }
+  userForm.privateKeyHex = "";
+  userForm.hasStoredSecret = true;
+  syncConnectionFormToSession();
+  session.updateActiveAccount({ ...userForm, privateKeyHex: "" });
+  session.persistState();
+  registerMessage.value = t("Identity saved to secure storage.");
+};
+
+const saveAuthority = async () => {
+  if (!authorityForm.accountId.trim() || !authorityForm.privateKeyHex.trim()) {
+    registerMessage.value = t("Enter an authority private key first.");
+    return;
+  }
+  const vaultAvailable = await isSecureVaultAvailable().catch(() => false);
+  if (!vaultAvailable) {
+    registerMessage.value = t(
+      "Secure OS-backed key storage is unavailable on this device.",
+    );
+    return;
+  }
+  try {
+    await storeAccountSecret({
+      accountId: authorityForm.accountId,
+      privateKeyHex: authorityForm.privateKeyHex,
+    });
+  } catch (error) {
+    registerMessage.value = toUserFacingErrorMessage(
+      error,
+      t("Secure OS-backed key storage is unavailable on this device."),
+    );
+    return;
+  }
+  authorityForm.privateKeyHex = "";
+  authorityForm.hasStoredSecret = true;
+  session.updateAuthority({ ...authorityForm, privateKeyHex: "" });
+  session.persistState();
+  registerMessage.value = t("Authority saved to secure storage.");
+};
+
+const handlePing = async () => {
+  pingLoading.value = true;
+  pingMessage.value = "";
+  try {
+    const result = await pingTorii(connectionForm.toriiUrl);
+    pingState.value = result ? "ok" : "error";
+    pingMessage.value = result
+      ? t("Torii responded successfully.")
+      : t("No response from Torii.");
+  } catch (error) {
+    pingState.value = "error";
+    pingMessage.value = toUserFacingErrorMessage(
+      error,
+      t("Unable to reach Torii."),
+    );
+  } finally {
+    pingLoading.value = false;
+  }
+};
+
+const handleGenerate = async () => {
+  generating.value = true;
+  try {
+    const pair = await generateKeyPair();
+    userForm.privateKeyHex = pair.privateKeyHex;
+    userForm.publicKeyHex = pair.publicKeyHex;
+    if (!userForm.domain) {
+      userForm.domain = DEFAULT_DOMAIN_LABEL;
+    }
+    const summary = deriveAccountAddress({
+      domain: userForm.domain,
+      publicKeyHex: pair.publicKeyHex,
+      networkPrefix: connectionForm.networkPrefix,
+    });
+    Object.assign(userForm, summary);
+    await saveUser();
+  } finally {
+    generating.value = false;
+  }
+};
+
+const handleDerivePublic = () => {
+  if (!userForm.privateKeyHex) return;
+  try {
+    const derived = derivePublicKey(userForm.privateKeyHex);
+    userForm.publicKeyHex = derived.publicKeyHex;
+    const summary = deriveAccountAddress({
+      domain: userForm.domain || DEFAULT_DOMAIN_LABEL,
+      publicKeyHex: derived.publicKeyHex,
+      networkPrefix: connectionForm.networkPrefix,
+    });
+    Object.assign(userForm, summary);
+  } catch (error) {
+    registerMessage.value = toUserFacingErrorMessage(
+      error,
+      t("Failed to create the on-chain account."),
+    );
+  }
+};
+
+const handleRegister = async () => {
+  if (!canRegister.value) return;
+  registering.value = true;
+  registerMessage.value = "";
+  try {
+    const metadata = metadataSchema.parse(
+      JSON.parse(metadataInput.value || "{}"),
+    );
+    const result = await registerAccount({
+      toriiUrl: connectionForm.toriiUrl,
+      chainId: connectionForm.chainId,
+      accountId: userForm.accountId,
+      domainId: userForm.domain,
+      metadata,
+      authorityAccountId: authorityForm.accountId,
+      authorityPrivateKeyHex: authorityForm.privateKeyHex.trim() || undefined,
+    });
+    syncConnectionFormToSession();
+    session.updateActiveAccount({ ...userForm, privateKeyHex: "" });
+    session.persistState();
+    registerMessage.value = appendTransactionFee(
+      t("Submitted transaction {hash}", {
+        hash: result.hash,
+      }),
+      result,
+      t,
+      transactionFeeHintForEndpoint(connectionForm.toriiUrl),
+    );
+  } catch (error) {
+    registerMessage.value = toUserFacingErrorMessage(
+      error,
+      t("Failed to save the authority account."),
+    );
+  } finally {
+    registering.value = false;
+  }
+};
+</script>
+
+<style scoped>
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.helper {
+  margin-top: 12px;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.chain-picker {
+  margin-bottom: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.preset-chip {
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 10px 12px;
+  min-width: 140px;
+  text-align: start;
+  display: grid;
+  gap: 2px;
+  cursor: pointer;
+  color: inherit;
+}
+
+.preset-chip.active {
+  border-color: var(--iroha-accent);
+  box-shadow: 0 8px 24px rgba(255, 76, 102, 0.24);
+}
+
+.preset-chip.fixed {
+  cursor: default;
+}
+
+.chip-title {
+  font-weight: 700;
+}
+
+.chip-sub {
+  font-size: 0.82rem;
+  color: var(--iroha-muted);
+}
+</style>
