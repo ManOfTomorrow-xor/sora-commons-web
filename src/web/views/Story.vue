@@ -199,7 +199,6 @@
     </div>
 
     <!-- mobile sticky donate -->
-    <button class="mobile-donate btn-gold" :disabled="isMine" @click="openDonate">Donate</button>
 
     <!-- DONATE MODAL -->
     <div v-if="showDonate" class="dm__overlay" @click.self="showDonate = false">
@@ -466,7 +465,7 @@ watch(() => commons.scrollToComments, (should) => {
 .iconbtn:disabled, .support__follow:disabled { opacity: .4; cursor: not-allowed; }
 .iconbtn:disabled:hover { border-color: var(--line); color: var(--ink-dim); }
 .support__follow:disabled:hover { border-color: var(--line); }
-.support__donate:disabled, .mobile-donate:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; filter: none; }
+.support__donate:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; filter: none; }
 .support__follow { background: var(--navy-900); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 11px; color: var(--ink); font-weight: 600; font-size: .9rem; cursor: pointer; }
 .support__follow:hover { border-color: var(--gold-600); }
 .support__follow.on { color: var(--gold-300); border-color: var(--gold-600); }
@@ -478,27 +477,6 @@ watch(() => commons.scrollToComments, (should) => {
 
 
 /* mobile sticky donate */
-.mobile-donate.__unused { display: none; }
-@media (max-width: 920px) {
-.mobile-donate {
-  display: none;
-  position: fixed;
-  left: 12px; right: 12px;
-  bottom: calc(76px + env(safe-area-inset-bottom, 0px));
-  z-index: 55;
-  padding: 15px;
-  border: none;
-  border-radius: var(--r);
-  background: linear-gradient(180deg, var(--gold-300), var(--gold-500));
-  color: #22180a;
-  font-weight: 800;
-  font-size: 1.05rem;
-  letter-spacing: .01em;
-  cursor: pointer;
-  box-shadow: 0 8px 24px rgba(0,0,0,.4), 0 4px 14px rgba(201,168,76,.3);
-  transition: transform .28s var(--ease), opacity .28s var(--ease);
-}
-}
 .back { color: var(--gold-300); font-size: .86rem; margin-bottom: 16px; display: inline-block; cursor: pointer; }
 .sd__badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 .badge { display: inline-flex; align-items: center; gap: 6px; font-size: .72rem; font-family: var(--mono); padding: 4px 10px; border-radius: 999px; }

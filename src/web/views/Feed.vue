@@ -145,8 +145,8 @@ const boostsPerWeek = COMMONS_CONFIG.BOOSTS_PER_WEEK;
 const emit = defineEmits<{ (e: "nav", id: string): void }>();
 const commons = useCommonsStore();
 
-const sorts = ["Active", "Newest", "Most boosted"] as const;
-const sort = ref<(typeof sorts)[number]>("Active");
+const sorts = ["Newest", "Most boosted"] as const;
+const sort = ref<(typeof sorts)[number]>("Newest");
 const tab = ref<"all" | "following">("all");
 const tabsRef = ref<HTMLElement | null>(null);
 const tabIndicator = ref({ left: '0px', width: '0px', opacity: '0' });
