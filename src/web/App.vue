@@ -69,7 +69,7 @@
         <div :key="active" class="view-slot">
           <Feed v-if="active === 'feed'" @nav="go" />
           <Story v-else-if="active === 'story'" @nav="go" />
-          <Compose v-else-if="active === 'post'" @nav="go" />
+          <Compose v-else-if="active === 'post'" @nav="go" @back="goBack" />
           <Profile v-else-if="active === 'profile'" @nav="go" />
           <About v-else-if="active === 'about'" />
           <Treasury v-else-if="active === 'treasury'" />
@@ -135,6 +135,7 @@ watch(() => commons.boostBlockedTick, () => {
 });
 
 const active = ref("feed");
+const previousView = ref("feed");
 function scheduleMove() { nextTick(() => requestAnimationFrame(moveNavIndicator)); }
 watch(active, scheduleMove);
 onMounted(() => {
@@ -151,6 +152,7 @@ const go = (id: string) => {
   if (!sameView && !resetFeedScroll && active.value === 'feed') commons.feedScrollY = window.scrollY;
   else if (!sameView && active.value === 'explore') commons.exploreScrollY = window.scrollY;
   resetFeedScroll = false;
+  if (view !== active.value) previousView.value = active.value;
   active.value = view;
   navHidden.value = false;
   lastY = 0;
@@ -164,6 +166,7 @@ const go = (id: string) => {
   }
 };
 function goHome() { resetFeedScroll = true; commons.feedScrollY = 0; commons.feedShownCount = 10; go('feed'); }
+function goBack() { go(previousView.value || 'feed'); }
 
 
 function tabTap(id: string) {

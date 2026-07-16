@@ -1,5 +1,6 @@
 <template>
   <div class="compose">
+    <button class="back" @click="$emit('back')">← Back</button>
     <header class="head">
       <h1>Tell the story of your work</h1>
       <p class="sub">Posting is free. Share what you're building, prove it milestone by milestone, and let people follow and support it.</p>
@@ -141,7 +142,7 @@ onBeforeUnmount(() => {
   if (!commons.resumingDraft) commons.resetDraft();
 });
 
-const emit = defineEmits<{ (e: "nav", id: string): void }>();
+const emit = defineEmits<{ (e: "nav", id: string): void; (e: "back"): void }>();
 const commons = useCommonsStore();
 
 const LIMITS = {
@@ -302,6 +303,8 @@ async function onPost() {
 </script>
 
 <style scoped>
+.back { color: var(--gold-300); font-size: .86rem; margin: 0 0 20px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; background: none; border: none; padding: 6px 0; font-family: inherit; align-self: flex-start; transition: opacity .2s, transform .2s; }
+.back:hover { opacity: .8; transform: translateX(-2px); }
 .track__ic { width: 15px; height: 15px; vertical-align: -2px; }
 .compose { display: flex; flex-direction: column; gap: 16px; max-width: 760px; margin: 0 auto; width: 100%; }
 .head h1 { font-family: var(--display); font-size: 2rem; font-weight: 800; letter-spacing: -.02em; margin: 0 0 6px; }
