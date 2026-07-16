@@ -1079,6 +1079,7 @@ const draftFiles = ref<any[]>([]);
       month: "short", day: "numeric", year: "numeric",
     });
   };
+  const fmtXor = (v: string | number): string => (Number(v) || 0).toFixed(2);
 
   const proposerLabel = (accountId: string): string => {
     const theirs = proposals.value.filter((p) => p.proposerAccountId === accountId);

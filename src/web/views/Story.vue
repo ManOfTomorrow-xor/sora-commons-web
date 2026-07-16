@@ -216,8 +216,8 @@
         <p v-if="amount === 1000000" class="dm__capnote">Maximum donation is 1,000,000 XOR.</p>
 
         <div v-if="amount > 0" class="dm__split">
-          <div><span>To proposer</span><b>{{ (amount * 0.99).toFixed(4) }} XOR</b></div>
-          <div><span>Burned (1%)</span><b>{{ (amount * 0.01).toFixed(4) }} XOR</b></div>
+          <div><span>To proposer</span><b>{{ (amount * 0.99).toFixed(2) }} XOR</b></div>
+          <div><span>Burned (1%)</span><b>{{ (amount * 0.01).toFixed(2) }} XOR</b></div>
         </div>
 
         <WhyExpander label="Why 1%?" anchor="burn" @navigate="onWhyNav">

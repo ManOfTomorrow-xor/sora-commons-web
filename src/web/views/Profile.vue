@@ -36,7 +36,7 @@
     <div class="pstats">
       <div><b>{{ theirProposals.length }}</b><span>proposals</span></div>
       <div><b>{{ deliveredCount }}</b><span>delivered</span></div>
-      <div><b>{{ totalRaised }}</b><span>XOR raised</span></div>
+      <div><b>{{ commons.fmtXor(totalRaised) }}</b><span>XOR raised</span></div>
       <div><b>{{ totalBackers }}</b><span>backers</span></div>
     </div>
 
@@ -58,7 +58,7 @@
         </div>
         <h3>{{ p.title }}</h3>
         <p class="wsnip">{{ p.description }}</p>
-        <div class="wmeta">{{ p.totalDonated || 0 }} XOR raised · {{ p.backers || 0 }} backers</div>
+        <div class="wmeta">{{ commons.fmtXor(p.totalDonated) }} XOR raised · {{ p.backers || 0 }} backers</div>
       </article>
     </div>
 
@@ -66,9 +66,9 @@
     <div v-else-if="tab === 'activity' && isOwn">
       <h2 class="asec">Your support</h2>
       <div class="pstats pstats--soft">
-        <div><b>{{ youDonated }}</b><span>XOR donated</span></div>
+        <div><b>{{ commons.fmtXor(youDonated) }}</b><span>XOR donated</span></div>
         <div><b>{{ youBoosted }}</b><span>boosts given</span></div>
-        <div><b>{{ youBurned }}</b><span>XOR burned</span></div>
+        <div><b>{{ commons.fmtXor(youBurned) }}</b><span>XOR burned</span></div>
       </div>
       <p class="anote">Preview totals from testnet activity — no real XOR moves yet.</p>
 
