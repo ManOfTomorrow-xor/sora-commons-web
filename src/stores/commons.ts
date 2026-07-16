@@ -1554,7 +1554,7 @@ const toggleFollow = (id: string): void => {
     setActiveProposal, addMilestone, removeMilestone,
     resetDraft, submitProposal, loadProposals,
     postDiscussion, markChapterDelivered, milestoneChallengeState, proposalChallengeState, raiseFlag, withdrawFlag, respondToFlag, uploadAvatar, uploadDocument, getAvatar, avatarUrl, avatarByAccount,
-    updateProfile, getDisplayName, getBio, displayNameByAccount, bioByAccount, formatDate, feedShownCount, hasDraft, saveDraft, loadDraft, deleteDraft, checkDraft, draftPreview, resumingDraft, uploadDraftFile, linkDraftFileToProposal, deleteDraftFiles, draftFiles,
+    updateProfile, getDisplayName, getBio, displayNameByAccount, bioByAccount, formatDate, fmtXor, feedShownCount, hasDraft, saveDraft, loadDraft, deleteDraft, checkDraft, draftPreview, resumingDraft, uploadDraftFile, linkDraftFileToProposal, deleteDraftFiles, draftFiles,
 
     // Helpers
     roleLabel, roleHint,
