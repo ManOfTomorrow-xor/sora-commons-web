@@ -298,7 +298,7 @@ function avStyle(id: string) {
 .hero__link:hover { text-decoration: underline; }
 
 .grid { display: grid; grid-template-columns: minmax(0,1fr) 280px; gap: 24px; align-items: start; }
-@media (max-width: 980px) { .grid { grid-template-columns: 1fr; }}
+@media (max-width: 980px) { .grid { grid-template-columns: minmax(0,1fr); }}
 .sort { display: flex; gap: 6px; flex-wrap: wrap; }
 .sort button { background: var(--navy-850); border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px; color: var(--ink-dim); font-size: .82rem; cursor: pointer; }
 .sort button.on { background: rgba(201,168,76,.12); border-color: var(--gold-600); color: var(--gold-300); }
@@ -361,7 +361,7 @@ function avStyle(id: string) {
 .i-heart.pulse { animation: pop var(--dur-slow) var(--ease-spring) both; transform-origin: center; }
 .i-bolt.zapping { animation: zap var(--dur-slow) var(--ease-spring) both; transform-origin: center; }
 .eng .i-bolt { color: inherit; }
-.card__title { font-family: var(--display); font-size: 1.3rem; font-weight: 700; margin: 0 0 6px; line-height: 1.2; }
+.card__title { font-family: var(--display); font-size: 1.3rem; font-weight: 700; margin: 0 0 6px; line-height: 1.2; overflow-wrap: anywhere; }
 .card__snip { color: var(--ink-dim); font-size: .92rem; margin: 0 0 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .track { display: inline-flex; align-items: center; gap: 6px; font-size: .72rem; font-family: var(--mono); padding: 4px 10px; border-radius: 999px; margin-bottom: 14px; }
 .track--don { background: rgba(201,168,76,.12); color: var(--gold-300); border: 1px solid var(--gold-600); }
