@@ -1,5 +1,6 @@
 <template>
   <div class="app">
+    <Analytics />
     <!-- TOP BAR -->
     <header class="topbar" :class="{ 'nav-hidden': navHidden }">
     <div v-if="isTestVersion" class="testbar">
@@ -100,6 +101,7 @@ import Explore from "./views/Explore.vue";
 import Feed from "./views/Feed.vue";
 import Search from "./views/Search.vue";
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
+import { Analytics } from "@vercel/analytics/vue";
 import { useCommonsStore } from "@/stores/commons";
 import { COMMONS_CONFIG } from "@/constants/commonsConfig";
 const commons = useCommonsStore();
